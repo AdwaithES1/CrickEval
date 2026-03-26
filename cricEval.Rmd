@@ -1,0 +1,509 @@
+---
+title: "Cricket Data Analysis - Batsmen Performance"
+author: "Team CricEval"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```r
+```{r}
+library(readr)
+
+# Read dataset
+df <- read_csv("top10_batsmen_dataset.csv")
+
+# View first rows
+head(df)
+
+# Dimensions (rows, columns)
+dim(df)
+
+# Structure
+str(df)
+
+# Summary stats
+summary(df)
+
+# Column names
+colnames(df)
+
+
+
+
+# 1. Missing values per column
+missing_values <- colSums(is.na(df))
+missing_values
+
+# 2. Empty strings in character columns
+empty_strings <- sapply(df, function(x) {
+  if (is.character(x)) sum(x == "", na.rm = TRUE) else 0
+})
+empty_strings
+
+# 3. Duplicate rows
+duplicate_count <- sum(duplicated(df))
+duplicate_count
+
+# 4. Data types of all columns
+data_types <- sapply(df, class)
+data_types
+
+# 5. Detect possible mixed/wrong types (numeric stored as character)
+mixed_type_check <- sapply(df, function(x) {
+  if (is.character(x)) {
+    suppressWarnings(sum(!is.na(as.numeric(x))))
+  } else {
+    NA
+  }
+})
+mixed_type_check
+# 🧹 3. Data Cleaning
+```{r}
+library(dplyr)
+library(stringr)
+
+# 1. Remove duplicate rows
+df <- df %>%
+  distinct()
+
+# 2. Trim whitespace from character columns
+df <- df %>%
+  mutate(across(where(is.character), str_trim))
+
+# 3. Standardize text casing (lowercase for consistency)
+df <- df %>%
+  mutate(across(where(is.character), str_to_lower))
+
+# 4. Convert numeric-like columns to numeric (EDIT based on your dataset)
+# Example:
+# df$runs_off_bat <- as.numeric(df$runs_off_bat)
+# df$extras <- as.numeric(df$extras)
+
+# 5. Convert categorical columns to factor (EDIT based on dataset)
+# Example:
+# df$batsman <- as.factor(df$batsman)
+# df$bowler <- as.factor(df$bowler)
+# df$venue <- as.factor(df$venue)
+
+# 6. Handle invalid values (example rules)
+# Replace negative runs with NA (if any)
+# df$runs_off_bat[df$runs_off_bat < 0] <- NA
+
+# Replace empty strings with NA
+df[df == ""] <- NA
+```{r}
+# Remove rows where BOTH ball_line and ball_length are missing
+df <- df %>%
+  filter(!(is.na(ball_line) & is.na(ball_length)))
+
+# Check how many rows remain
+dim(df)
+# 7. Final check
+str(df)
+summary(df)
+# 🗑️ 4. Drop or Ignore Useless Columns
+```{r}
+library(dplyr)
+
+# Drop irrelevant / redundant columns
+df <- df %>%
+  select(
+    -`full name_striker`,
+    -`full name_bowler`,
+    -`image url_striker`,
+    -`image url_bowler`,
+    -`major teams_striker`,
+    -`major teams_bowler`,
+    -`player_of_match.1`,
+    -event,
+    -type
+  )
+
+# Optional: rename columns with spaces for easier use later
+df <- df %>%
+  rename(
+    balls_faced = `striker balls faced`,
+    total_runs = `total striker runs`,
+    out_runs = `player out runs`,
+    out_balls = `player out balls faced`
+  )
+
+# Verify updated columns
+colnames(df)
+
+# 🏏 5. Understand the Structure of the Cricket Data
+
+```{r}
+library(dplyr)
+
+# 1. Unique batsmen
+num_batsmen <- n_distinct(df$striker)
+num_batsmen
+
+# 2. Matches, seasons, venues, opponents
+num_matches <- n_distinct(df$match_id)
+num_seasons <- n_distinct(df$season)
+num_venues <- n_distinct(df$venue)
+num_opponents <- n_distinct(df$bowling_team)
+
+num_matches
+num_seasons
+num_venues
+num_opponents
+
+# 3. Understand dataset level (by checking uniqueness)
+# Check how many balls per match
+df %>%
+  group_by(match_id) %>%
+  summarise(total_balls = n()) %>%
+  head()
+
+# Check balls per batsman
+df %>%
+  group_by(striker) %>%
+  summarise(balls_faced = n()) %>%
+  arrange(desc(balls_faced)) %>%
+  head()
+
+# 4. Identify column types (manual understanding)
+colnames(df)
+
+# 5. Decide analysis level
+
+# Ball-level data example
+head(df)
+
+# Batsman-level aggregation
+batsman_summary <- df %>%
+  group_by(striker) %>%
+  summarise(
+    total_runs = sum(runs_off_bat, na.rm = TRUE),
+    balls = n(),
+    strike_rate = (total_runs / balls) * 100
+  )
+
+head(batsman_summary)
+
+# Match-level summary
+match_summary <- df %>%
+  group_by(match_id) %>%
+  summarise(
+    total_runs = sum(runs_off_bat, na.rm = TRUE),
+    total_wickets = sum(wicket, na.rm = TRUE)
+  )
+
+head(match_summary)
+
+# 📊 7. Univariate EDA
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# 1. Batsman frequency
+df %>%
+  count(striker, sort = TRUE) %>%
+  head(10)
+
+# 2. Bowler frequency
+df %>%
+  count(bowler, sort = TRUE) %>%
+  head(10)
+
+# 3. Venue frequency
+df %>%
+  count(venue, sort = TRUE) %>%
+  head(10)
+
+# 4. Season frequency
+df %>%
+  count(season, sort = TRUE)
+
+# 5. Batting team frequency
+df %>%
+  count(batting_team, sort = TRUE)
+
+# 6. Bowling team frequency
+df %>%
+  count(bowling_team, sort = TRUE)
+
+# 7. Shot type frequency
+df %>%
+  count(shot_played, sort = TRUE) %>%
+  head(10)
+
+# 8. Shot direction frequency
+df %>%
+  count(shot_direction, sort = TRUE) %>%
+  head(10)
+
+# 9. Wicket type frequency
+df %>%
+  count(wicket_type, sort = TRUE)
+
+```{r}
+library(ggplot2)
+
+# 1. Runs scored per ball
+ggplot(df, aes(x = runs_off_bat)) +
+  geom_histogram(bins = 10) +
+  labs(title = "Distribution of Runs per Ball")
+
+# 2. Extras distribution
+ggplot(df, aes(x = extras)) +
+  geom_histogram(bins = 10) +
+  labs(title = "Distribution of Extras")
+
+# 3. Balls faced (using aggregated data)
+batsman_stats <- df %>%
+  group_by(striker) %>%
+  summarise(
+    balls = n(),
+    total_runs = sum(runs_off_bat, na.rm = TRUE),
+    strike_rate = (total_runs / balls) * 100
+  )
+
+# Balls faced distribution
+ggplot(batsman_stats, aes(x = balls)) +
+  geom_histogram(bins = 20) +
+  labs(title = "Distribution of Balls Faced")
+
+# 4. Total runs distribution
+ggplot(batsman_stats, aes(x = total_runs)) +
+  geom_histogram(bins = 20) +
+  labs(title = "Distribution of Total Runs")
+
+# 5. Strike rate distribution
+ggplot(batsman_stats, aes(x = strike_rate)) +
+  geom_histogram(bins = 20) +
+  labs(title = "Distribution of Strike Rate")
+
+# 🔗 8. Bivariate EDA
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Create batsman summary (reuse this everywhere)
+batsman_stats <- df %>%
+  group_by(striker) %>%
+  summarise(
+    total_runs = sum(runs_off_bat, na.rm = TRUE),
+    balls = n(),
+    strike_rate = (total_runs / balls) * 100
+  ) %>%
+  filter(balls > 50)   # remove very small samples
+
+# 1. Compare runs by batsman (Top 10)
+batsman_stats %>%
+  arrange(desc(total_runs)) %>%
+  head(10) %>%
+  ggplot(aes(x = reorder(striker, total_runs), y = total_runs)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Top 10 Batsmen by Total Runs")
+
+# 2. Compare strike rate by batsman
+batsman_stats %>%
+  arrange(desc(strike_rate)) %>%
+  head(10) %>%
+  ggplot(aes(x = reorder(striker, strike_rate), y = strike_rate)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Top 10 Batsmen by Strike Rate")
+
+# 3. Performance by venue
+venue_stats <- df %>%
+  group_by(venue) %>%
+  summarise(avg_runs = mean(runs_off_bat, na.rm = TRUE))
+
+ggplot(venue_stats, aes(x = reorder(venue, avg_runs), y = avg_runs)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Average Runs per Ball by Venue")
+
+# 4. Performance by opponent (bowling team)
+opponent_stats <- df %>%
+  group_by(bowling_team) %>%
+  summarise(avg_runs = mean(runs_off_bat, na.rm = TRUE))
+
+ggplot(opponent_stats, aes(x = reorder(bowling_team, avg_runs), y = avg_runs)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Performance vs Opponent")
+
+# 5. Performance by season
+season_stats <- df %>%
+  group_by(season) %>%
+  summarise(avg_runs = mean(runs_off_bat, na.rm = TRUE))
+
+ggplot(season_stats, aes(x = season, y = avg_runs)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Performance Across Seasons")
+
+# 6. Performance by batting style
+bat_style_stats <- df %>%
+  group_by(`batting style_striker`) %>%
+  summarise(avg_runs = mean(runs_off_bat, na.rm = TRUE))
+
+ggplot(bat_style_stats, aes(x = `batting style_striker`, y = avg_runs)) +
+  geom_col() +
+  labs(title = "Performance by Batting Style")
+
+# 7. Performance by bowling style
+bowl_style_stats <- df %>%
+  group_by(`bowling style_bowler`) %>%
+  summarise(avg_runs = mean(runs_off_bat, na.rm = TRUE))
+
+ggplot(bowl_style_stats, aes(x = `bowling style_bowler`, y = avg_runs)) +
+  geom_col() +
+  labs(title = "Performance vs Bowling Style")
+
+# 8. Shot type vs runs
+shot_stats <- df %>%
+  group_by(shot_played) %>%
+  summarise(avg_runs = mean(runs_off_bat, na.rm = TRUE))
+
+ggplot(shot_stats, aes(x = reorder(shot_played, avg_runs), y = avg_runs)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Runs by Shot Type")
+
+# 9. Shot direction vs runs
+direction_stats <- df %>%
+  group_by(shot_direction) %>%
+  summarise(avg_runs = mean(runs_off_bat, na.rm = TRUE))
+
+ggplot(direction_stats, aes(x = reorder(shot_direction, avg_runs), y = avg_runs)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Runs by Shot Direction")
+
+# 📊 9. Visualizations
+```{r}
+library(dplyr)
+library(ggplot2)
+library(GGally)
+
+# Prepare batsman stats (reuse)
+batsman_stats <- df %>%
+  group_by(striker) %>%
+  summarise(
+    total_runs = sum(runs_off_bat, na.rm = TRUE),
+    balls = n(),
+    strike_rate = (total_runs / balls) * 100
+  ) %>%
+  filter(balls > 50)
+
+# -------------------------------
+# 1. Bar Chart (Category Counts)
+# -------------------------------
+df %>%
+  count(batting_team) %>%
+  ggplot(aes(x = reorder(batting_team, n), y = n)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Matches by Batting Team")
+
+# -------------------------------
+# 2. Histogram (Numeric)
+# -------------------------------
+ggplot(df, aes(x = runs_off_bat)) +
+  geom_histogram(bins = 10) +
+  labs(title = "Runs Distribution")
+
+# -------------------------------
+# 3. Boxplot (Numeric)
+# -------------------------------
+ggplot(df, aes(y = runs_off_bat)) +
+  geom_boxplot() +
+  labs(title = "Boxplot of Runs")
+
+# -------------------------------
+# 4. Violin Plot (Batsman Performance)
+# -------------------------------
+top_batsmen <- batsman_stats %>%
+  arrange(desc(total_runs)) %>%
+  head(5) %>%
+  pull(striker)
+
+df %>%
+  filter(striker %in% top_batsmen) %>%
+  ggplot(aes(x = striker, y = runs_off_bat)) +
+  geom_violin() +
+  labs(title = "Batsman Performance Distribution")
+
+# -------------------------------
+# 5. Heatmap (Correlation)
+# -------------------------------
+numeric_df <- batsman_stats %>%
+  select(total_runs, balls, strike_rate)
+
+cor_matrix <- cor(numeric_df)
+
+cor_df <- as.data.frame(as.table(cor_matrix))
+
+ggplot(cor_df, aes(Var1, Var2, fill = Freq)) +
+  geom_tile() +
+  labs(title = "Correlation Heatmap")
+
+# -------------------------------
+# 6. Scatter Plot
+# -------------------------------
+ggplot(batsman_stats, aes(x = balls, y = total_runs)) +
+  geom_point() +
+  labs(title = "Balls vs Runs")
+
+# -------------------------------
+# 7. Pair Plot
+# -------------------------------
+ggpairs(numeric_df)
+
+# -------------------------------
+# 8. Stacked Bar Chart
+# -------------------------------
+df %>%
+  count(batting_team, shot_played) %>%
+  ggplot(aes(x = batting_team, y = n, fill = shot_played)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Shot Type by Team") +
+  coord_flip()
+
+# ❗ 10. Missing Value and Null Analysis
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# 1. Count missing values per column
+missing_values <- colSums(is.na(df))
+missing_values
+
+# 2. Percentage of missing values
+missing_percent <- (missing_values / nrow(df)) * 100
+missing_percent
+
+# 3. Visualize missing values
+missing_df <- data.frame(
+  column = names(missing_values),
+  missing = missing_values
+)
+
+ggplot(missing_df, aes(x = reorder(column, missing), y = missing)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Missing Values per Column")
+
+# 4. Handle missing values
+
+# Replace NA in categorical columns with "unknown"
+df <- df %>%
+  mutate(across(where(is.character), ~ifelse(is.na(.), "unknown", .)))
+
+# Replace NA in numeric columns with median
+df <- df %>%
+  mutate(across(where(is.numeric), ~ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+# 5. Final check
+colSums(is.na(df))
