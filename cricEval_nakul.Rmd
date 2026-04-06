@@ -10,16 +10,19 @@ output: html_document
 ### Installing and Loading Packages
 
 ```{r}
-install.packages(c(
-  "tidyverse",
-  "data.table",
-  "ggplot2",
-  "corrplot",
-  "caret",
-  "cluster",
-  "GGally",
-  "reshape2"
-))
+#install.packages(c(
+#  "tidyverse",
+#  "data.table",
+#  "ggplot2",
+#  "corrplot",
+#  "caret",
+#  "cluster",
+#  "GGally",
+#  "reshape2",
+#  "xgboost",
+#  "Matrix",
+#  "janitor",
+#))
 ```
 
 ```{r}
@@ -32,12 +35,14 @@ library(cluster)
 library(GGally)
 library(reshape2)
 library(stringr)
+library(xgboost)
+library(Matrix)
+library(janitor)
 ```
 
 ### Load and Display Dataset
 
 ```{r}
-
 df <- read_csv("top10_batsmen_dataset.csv")
 head(df)
 dim(df)
@@ -89,22 +94,6 @@ df %>% distinct(match_id)
 ### Data Cleaning
 
 ```{r}
-# Remove duplicate rows
-df[duplicated(df), ]
-df <- df %>% distinct() # No duplicates present
-```
-
-```{r}
-# Trim whitespace from character columns
-df <- df %>% mutate(across(where(is.character), str_trim))
-```
-
-```{r}
-# Display all columns
-str(df)
-```
-
-```{r}
 # Remove unnecessary columns
 unwanted_cols <- c(
   "match_number",
@@ -117,6 +106,39 @@ unwanted_cols <- c(
 )
 
 df <- df %>% select(-all_of(unwanted_cols))
+```
+
+```{r}
+# Remove duplicate rows
+df[duplicated(df), ]
+df <- df %>% distinct() # No duplicates present
+```
+
+```{r}
+# Trim whitespace from character columns
+df <- df %>% mutate(across(where(is.character), str_trim))
+```
+
+```{r}
+clean_cat <- function(x) {
+  x %>%
+    str_squish() %>%
+    str_trim() %>%
+    str_replace_all("&", "and") %>%
+    str_replace_all("[^A-Za-z0-9]+", "_") %>%
+    str_replace_all("_+", "_") %>%
+    str_replace_all("^_|_$", "")
+}
+
+df <- df %>%
+  mutate(across(where(is.character), clean_cat))
+
+df <- janitor::clean_names(df)
+```
+
+```{r}
+# Display all columns
+str(df)
 ```
 
 ```{r}
@@ -228,10 +250,10 @@ ggplot(season_stats, aes(x = season, y = avg_runs)) +
 
 # 6. Performance by batting style
 bat_style_stats <- df %>% 
-  group_by(`batting style_striker`) %>% 
+  group_by(batting_style_striker) %>% 
   summarise(avg_runs = mean(runs_off_bat, na.rm = TRUE))
 
-ggplot(bat_style_stats, aes(x = `batting style_striker`, y = avg_runs)) + 
+ggplot(bat_style_stats, aes(x = batting_style_striker, y = avg_runs)) + 
   geom_col() + 
   labs(
     title = "Performance by Batting Style"
@@ -239,10 +261,10 @@ ggplot(bat_style_stats, aes(x = `batting style_striker`, y = avg_runs)) +
 
 # 7. Performance by bowling style
 bowl_style_stats <- df %>% 
-  group_by(`bowling style_bowler`) %>% 
+  group_by(bowling_style_bowler) %>% 
   summarise(avg_runs = mean(runs_off_bat, na.rm = TRUE))
 
-ggplot(bowl_style_stats, aes(x = `bowling style_bowler`, y = avg_runs)) + 
+ggplot(bowl_style_stats, aes(x = bowling_style_bowler, y = avg_runs)) + 
   geom_col() + 
   labs(
     title = "Performance vs Bowling Style"
@@ -498,46 +520,679 @@ ggplot(batsman_df, aes(y = total_runs)) +
   ggtitle("Total Runs per Batsman")
 ```
 
-### One Hot Encoding
+### Model Training
 
-#### Venue Grouping
+#### 1. Shot to Play - XGBoost
 
--   Group venues which are very less frequent into a single class "Others"
+**Why make striker stats and bowler stats?**
+
+If we directly use the striker and bowler names (even if one hot encoded), the model will treat them as states and will overfit to the names. We do not want that, so we will rather train the model on their stats and playing styles.
 
 ```{r}
-top_venues <- df %>%
-  count(venue, sort = TRUE) %>%
-  slice(1:10) %>%
-  pull(venue)
-top_venues
-
-df$venue_group <- ifelse(df$venue %in% top_venues, df$venue, "Others")
-
-# One Hot Encoding
-venue_encoded <- model.matrix(~ venue_group - 1, data = df)
-
-# Drop original
-df <- df %>% select(-venue, -venue_group)
-
-# Combine
-df <- cbind(df, venue_encoded)
-head(df)
+df <- df %>%
+  mutate(
+    is_boundary = ifelse(runs_off_bat %in% c(4,6), 1, 0),
+    total_runs_conceded = runs_off_bat + extras,
+    is_dot = ifelse(runs_off_bat == 0, 1, 0)
+  )
 ```
 
 ```{r}
-encoded_df <- model.matrix(
-  ~ batting_team + bowling_team + shot_played + shot_direction - 1,
-  data = df
+striker_stats <- df %>%
+  group_by(striker) %>%
+  summarise(
+    total_runs = sum(runs_off_bat, na.rm = TRUE),
+    balls_faced = n(),
+    strike_rate = (total_runs / balls_faced) * 100,
+    boundary_pct = mean(is_boundary, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r}
+bowler_stats <- df %>%
+  group_by(bowler) %>%
+  summarise(
+    runs_conceded = sum(total_runs_conceded, na.rm = TRUE),
+    balls_bowled = n(),
+    wickets = sum(wicket, na.rm = TRUE),
+    economy = runs_conceded / (balls_bowled / 6),
+    wicket_rate = wickets / balls_bowled,
+    dot_ball_pct = mean(is_dot, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r}
+df <- df %>%
+  left_join(striker_stats, by = "striker") %>%
+  left_join(bowler_stats, by = "bowler")
+```
+
+```{r}
+train_dataset <- df %>%
+  filter(!is.na(shot_played)) %>%
+  select(
+    shot_played,
+    ball_length,
+    ball_line,
+    innings,
+    ball,
+    strike_rate,
+    boundary_pct,
+    economy,
+    wicket_rate,
+    dot_ball_pct,
+    batting_style_striker,
+    bowling_style_bowler
+  ) %>%
+  na.omit()
+
+train_dataset
+```
+
+```{r}
+train_dataset %>% 
+  distinct(shot_played)
+```
+
+**Label Encoding**
+
+```{r}
+# Encode Target (shot_played)
+encode_target <- function(df, target_col) {
+  df[[target_col]] <- as.factor(df[[target_col]])
+  label <- as.numeric(df[[target_col]]) - 1
+  
+  return(list(
+    df = df,
+    label = label
+  ))
+}
+
+result <- encode_target(train_dataset, "shot_played")
+
+train_dataset <- result$df
+label <- result$label
+
+tibble(label)
+```
+
+**One Hot Encoding**
+
+We will one hot encode **categorical features** as model only understands numerical data.
+
+```{r}
+
+onehot_encode_features <- function(df, ignore_col) {
+  dummies <- dummyVars(~ ., data = df %>% select(-all_of(ignore_col)))
+  X <- predict(dummies, newdata = df) 
+  
+  return(list(
+    X = as.matrix(X),
+    encoder = dummies
+  ))
+}
+
+result <- onehot_encode_features(train_dataset, "shot_played")
+
+X <- result$X
+encoder <- result$encoder
+
+tibble(colnames(df))
+X
+```
+
+```{r}
+train_test_split <- function(X, y, train_ratio = 0.8) {
+  set.seed(42)
+  
+  train_idx <- sample(seq_len(nrow(X)), size = train_ratio * nrow(X))
+  
+  X_train <- X[train_idx, ]
+  X_test  <- X[-train_idx, ]
+  
+  y_train <- y[train_idx]
+  y_test  <- y[-train_idx]
+  
+  return(list(
+    X_train = X_train,
+    X_test = X_test,
+    y_train = y_train,
+    y_test = y_test
+  ))
+}
+
+result <- train_test_split(X, label)
+
+X_train <- result$X_train
+X_test  <- result$X_test
+y_train <- result$y_train
+y_test  <- result$y_test
+```
+
+```{r}
+train_xgboost_model <- function(X_train, y_train, X_test, y_test, 
+                                nrounds = 100, max_depth = 6, eta = 0.1) {
+  
+  # Create DMatrix
+  dtrain <- xgb.DMatrix(data = X_train, label = y_train)
+  dtest  <- xgb.DMatrix(data = X_test, label = y_test)
+  
+  # Number of classes
+  num_class <- length(unique(y_train))
+  
+  # Parameters
+  params <- list(
+    objective = "multi:softprob",   # multiclass classification (probabilities)
+    num_class = num_class,          # number of target classes
+    eval_metric = "mlogloss",       # multiclass log loss
+    max_depth = 6,                  # depth of decision tree
+    eta = 0.1                       # learning rate
+  )
+  # objective = "multi:softmax" -> directly predict the most probable class
+  # This is not so flexibly, we wont be able to take topN classes
+    
+  # Train model
+  model <- xgb.train(
+    params = params,
+    data = dtrain,
+    nrounds = nrounds,
+    evals = list(train = dtrain, test = dtest),
+    verbose = 1
+  )
+  
+  eval_log <- attr(model, "evaluation_log")
+  
+  return(list(
+    model = model,
+    eval_log = eval_log,
+    params = params,
+    dtrain = dtrain,
+    dtest = dtest,
+    num_class = num_class
+  ))
+}
+```
+
+```{r}
+result <- train_xgboost_model(X_train, y_train, X_test, y_test)
+
+model = result$model
+eval_log = result$eval_log
+params = result$params
+dtest = result$dtest
+```
+
+```{r}
+str(model)
+```
+
+```{r}
+str(eval_log)
+```
+
+```{r}
+plot_model_loss <- function(eval_log) {
+  log_long <- eval_log %>%
+    pivot_longer(
+      cols = c(train_mlogloss, test_mlogloss),
+      names_to = "dataset",
+      values_to = "loss"
+    )
+  
+  ggplot(log_long, aes(x = iter, y = loss, color = dataset)) +
+    geom_line(linewidth = 1) +
+    labs(
+      title = "Train vs Test Loss",
+      x = "Iteration",
+      y = "Log Loss",
+      color = "Dataset"
+    ) +
+    theme_minimal()
+}
+```
+
+```{r}
+plot_model_loss(eval_log)
+```
+
+```{r}
+calc_accuracy <- function(model, dtest, y_test, num_class) {
+  pred_probs <- predict(model, dtest)
+  
+  pred_matrix <- matrix(pred_probs, ncol = num_class, byrow = TRUE)
+  pred_labels <- max.col(pred_matrix) - 1
+  
+  accuracy <- mean(pred_labels == y_test)
+  
+  return(list(
+    pred_labels = pred_labels,
+    accuracy = accuracy
+  ))
+}
+```
+
+```{r}
+num_class <- length(unique(y_test))
+
+result <- calc_accuracy(model, dtest, y_test, num_class)
+
+accuracy <- result$accuracy
+print(accuracy)
+
+# Why accuracy so low?
+# -> High number of classes (39 classes)
+# -> Reduce number of shot played classes by generalizing some classes together
+```
+
+```{r}
+importance <- xgb.importance(model = model)
+xgb.plot.importance(importance)
+```
+
+#### 2. Shot to Play - XGBoost with Grouped Target Classes
+
+```{r}
+colnames(train_dataset)
+```
+
+```{r}
+train_dataset <- train_dataset %>%
+  mutate(
+    shot_group = case_when(
+      shot_played %in% c("defense", "leave") ~ "defensive",
+
+      shot_played %in% c(
+        "drive", "cover_drive", "straight_drive", "off_drive", "on_drive"
+      ) ~ "drives",
+
+      shot_played %in% c(
+        "cut", "late_cut", "square_drive", "upper_cut",
+        "pull", "hook", "sweep", "french_cut"
+      ) ~ "backfoot_attack",
+
+      shot_played %in% c(
+        "dab", "nudge", "work", "flick", "whips", "clips",
+        "leg_glance", "glance", "glide", "paddle", "punch"
+      ) ~ "placement",
+
+      shot_played %in% c(
+        "slog", "loft", "lofted_drive", "ramp", "scoop", "switch_hit"
+      ) ~ "aggressive_lofted",
+
+      shot_played %in% c(
+        "outside_edge", "inside_edge", "edge", "edged", "beated", "beaten"
+      ) ~ "edges_misses",
+
+      TRUE ~ "other"
+    )
+  )
+
+train_dataset <- train_dataset %>%
+  select(-shot_played)
+
+train_dataset %>%
+  distinct(shot_group)
+```
+
+```{r}
+# Sorted Bar Chart
+train_dataset %>%
+  count(shot_group) %>%
+  ggplot(aes(x = reorder(shot_group, n), y = n, fill = shot_group)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Distribution of Shot Groups",
+    x = "Shot Group",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Donut chart
+train_dataset %>%
+  count(shot_group) %>%
+  mutate(percent = n / sum(n) * 100) %>%
+  ggplot(aes(x = 2, y = percent, fill = shot_group)) +
+  geom_col(width = 1) +
+  coord_polar(theta = "y") +
+  xlim(0.5, 2.5) +
+  theme_void() +
+  labs(title = "Shot Group Distribution")
+```
+
+```{r}
+result <- encode_target(train_dataset, "shot_group")
+
+train_dataset <- result$df
+label <- result$label
+
+tibble(label)
+```
+
+```{r}
+result <- onehot_encode_features(train_dataset, "shot_group")
+
+X <- result$X
+encoder <- result$encoder
+
+tibble(colnames(df))
+X
+```
+
+```{r}
+result <- train_test_split(X, label)
+
+X_train <- result$X_train
+X_test  <- result$X_test
+y_train <- result$y_train
+y_test  <- result$y_test
+```
+
+```{r}
+result <- train_xgboost_model(X_train, y_train, X_test, y_test)
+
+model = result$model
+eval_log = result$eval_log
+params = result$params
+dtest = result$dtest
+```
+
+```{r}
+plot_model_loss(eval_log)
+```
+
+```{r}
+num_class <- length(unique(y_test))
+
+result <- calc_accuracy(model, dtest, y_test, num_class)
+
+accuracy <- result$accuracy
+print(accuracy)
+```
+
+#### 3. Will batsman score a run or not - Binary Classification
+
+```{r}
+colnames(df)
+```
+
+```{r}
+df$target <- df$is_dot
+
+model_df <- df %>%
+  select(
+    target,                
+    season,
+    venue,
+    innings,
+    ball,
+    batting_team,
+    bowling_team,
+    ball_length,
+    ball_line,
+    gender,
+    event,
+    toss_winner,
+    toss_decision,
+    format,
+    type,
+    country_striker,
+    batting_style_striker,
+    bowling_style_striker,
+    playing_role_striker,
+    major_teams_striker,
+    country_bowler,
+    batting_style_bowler,
+    bowling_style_bowler,
+    playing_role_bowler,
+    major_teams_bowler
+  ) %>%
+  drop_na()
+```
+
+```{r}
+# Label encoding
+model_df <- model_df %>%
+  mutate(across(where(is.character), as.factor))
+```
+
+```{r}
+set.seed(42)
+idx <- createDataPartition(model_df$target, p = 0.8, list = FALSE)
+
+train_df <- model_df[idx, ]
+test_df  <- model_df[-idx, ]
+```
+
+```{r}
+x_train <- model.matrix(target ~ ., data = train_df)[, -1]
+y_train <- train_df$target
+
+x_test  <- model.matrix(target ~ ., data = test_df)[, -1]
+y_test  <- test_df$target
+
+# Fix column mismatch
+missing_cols <- setdiff(colnames(x_train), colnames(x_test))
+for (col in missing_cols) {
+  x_test <- cbind(x_test, rep(0, nrow(x_test)))
+  colnames(x_test)[ncol(x_test)] <- col
+}
+x_test <- x_test[, colnames(x_train)]
+```
+
+```{r}
+model <- glm(y_train ~ ., data = as.data.frame(x_train), family = "binomial")
+```
+
+```{r}
+prob <- predict(model, newdata = as.data.frame(x_test), type = "response")
+pred <- ifelse(prob > 0.5, 1, 0)
+```
+
+```{r}
+conf_mat <- table(Predicted = pred, Actual = y_test)
+print(conf_mat)
+```
+
+```{r}
+TP <- conf_mat["1","1"]
+TN <- conf_mat["0","0"]
+FP <- conf_mat["1","0"]
+FN <- conf_mat["0","1"]
+
+accuracy <- (TP + TN) / (TP + TN + FP + FN)
+precision <- TP / (TP + FP)
+recall <- TP / (TP + FN)
+f1 <- 2 * (precision * recall) / (precision + recall)
+
+cat("Accuracy:", accuracy, "\n")
+cat("Precision:", precision, "\n")
+cat("Recall:", recall, "\n")
+cat("F1:", f1, "\n")
+```
+
+```{r}
+cm_df <- as.data.frame(conf_mat)
+
+ggplot(cm_df, aes(x = Actual, y = Predicted, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), color = "white", size = 6) +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(title = "Confusion Matrix") +
+  theme_minimal()
+```
+
+```{r}
+summary(model)
+```
+
+### Statistical Tests
+
+```{r}
+df <- df %>%
+  mutate(
+    shot_group = case_when(
+      shot_played %in% c("defense", "leave") ~ "defensive",
+
+      shot_played %in% c(
+        "drive", "cover_drive", "straight_drive", "off_drive", "on_drive"
+      ) ~ "drives",
+
+      shot_played %in% c(
+        "cut", "late_cut", "square_drive", "upper_cut",
+        "pull", "hook", "sweep", "french_cut"
+      ) ~ "backfoot_attack",
+
+      shot_played %in% c(
+        "dab", "nudge", "work", "flick", "whips", "clips",
+        "leg_glance", "glance", "glide", "paddle", "punch"
+      ) ~ "placement",
+
+      shot_played %in% c(
+        "slog", "loft", "lofted_drive", "ramp", "scoop", "switch_hit"
+      ) ~ "aggressive_lofted",
+
+      shot_played %in% c(
+        "outside_edge", "inside_edge", "edge", "edged", "beated", "beaten"
+      ) ~ "edges_misses",
+
+      TRUE ~ "other"
+    )
+  )
+```
+
+```{r}
+# -----------------------------
+# 1) CHI-SQUARE TESTS
+# -----------------------------
+# Use categorical columns only
+cat_cols <- c(
+  "shot_group",           # or shot_played
+  "shot_direction",
+  "batting_style_striker",
+  "bowling_style_bowler",
+  "venue",
+  "batting_team",
+  "bowling_team",
+  "format",
+  "type",
+  "outcome",
+  "gender",
+  "innings"               # treat as categorical if values are small integers like 1,2
 )
 
-encoded_df <- as.data.frame(encoded_df)
-head(encoded_df)
+# Keep only columns that exist in df
+cat_cols <- intersect(cat_cols, names(df))
+
+# Convert to factor
+df_cat <- df %>%
+  mutate(across(all_of(cat_cols), as.factor))
+
+# Cramer's V helper
+cramers_v <- function(tab) {
+  chi <- suppressWarnings(chisq.test(tab, correct = FALSE))
+  n <- sum(tab)
+  r <- nrow(tab)
+  k <- ncol(tab)
+  as.numeric(sqrt(chi$statistic / (n * min(r - 1, k - 1))))
+}
+
+# Run chi-square on all pairs
+chi_results <- list()
+
+pairs <- combn(cat_cols, 2, simplify = FALSE)
+
+for (p in pairs) {
+  a <- p[1]
+  b <- p[2]
+  tab <- table(df_cat[[a]], df_cat[[b]])
+
+  # skip degenerate tables
+  if (nrow(tab) < 2 || ncol(tab) < 2) next
+
+  chi <- suppressWarnings(chisq.test(tab, correct = FALSE))
+
+  chi_results[[paste(a, b, sep = " vs ")]] <- tibble(
+    var1 = a,
+    var2 = b,
+    chi_sq = as.numeric(chi$statistic),
+    df = as.numeric(chi$parameter),
+    p_value = chi$p.value,
+    cramers_v = cramers_v(tab)
+  )
+}
+
+chi_results_df <- bind_rows(chi_results) %>%
+  arrange(p_value)
+
+print(chi_results_df)
+
+# Example: a single chi-square test
+tab <- table(df$shot_group, df$shot_direction)
+chisq.test(tab)
+
+
+# -----------------------------
+# 2) CORRELATION TESTS
+# -----------------------------
+# Use numeric columns only
+num_cols <- c(
+  "runs_off_bat",
+  "extras",
+  "ball_length",
+  "ball_line",
+  "innings",
+  "ball",
+  "strike_rate",
+  "boundary_pct",
+  "economy",
+  "wicket_rate",
+  "dot_ball_pct",
+  "total_runs_conceded",
+  "is_boundary",
+  "is_dot"
+)
+
+num_cols <- intersect(num_cols, names(df))
+
+df_num <- df %>%
+  select(all_of(num_cols)) %>%
+  mutate(across(everything(), as.numeric))
+
+# Spearman is safer for cricket data because many relationships are not perfectly linear
+cor_mat <- cor(df_num, use = "pairwise.complete.obs", method = "spearman")
+print(cor_mat)
+
+corrplot(cor_mat, method = "color", type = "upper", tl.cex = 0.8)
+
+# Pairwise correlation test example
+cor.test(df$runs_off_bat, df$extras, method = "spearman")
+
+# Find strongest correlations
+cor_pairs <- as.data.frame(as.table(cor_mat)) %>%
+  filter(Var1 != Var2) %>%
+  mutate(abs_cor = abs(Freq)) %>%
+  arrange(desc(abs_cor)) %>%
+  distinct(pmin(as.character(Var1), as.character(Var2)),
+           pmax(as.character(Var1), as.character(Var2)), .keep_all = TRUE)
+
+print(head(cor_pairs, 10))
 ```
 
 ```{r}
-# No column to do Label Encoding as there is no column with ordinal values
+chisq.test(table(df$shot_group, df$shot_direction))
+chisq.test(table(df$shot_group, df$batting_style_striker))
+chisq.test(table(df$shot_group, df$bowling_style_bowler))
+chisq.test(table(df$shot_group, df$venue))
+chisq.test(table(df$batting_team, df$bowling_team))
 ```
 
 ```{r}
-str(encoded_df)
+cor.test(df$runs_off_bat, df$extras, method = "spearman")
+cor.test(df$strike_rate, df$boundary_pct, method = "spearman")
+cor.test(df$economy, df$wicket_rate, method = "spearman")
+cor.test(df$dot_ball_pct, df$wicket_rate, method = "spearman")
 ```
